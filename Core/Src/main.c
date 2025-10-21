@@ -27,6 +27,7 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "stm32h7xx_hal_adc_ex.h"
+#include "motor_sim.h"
 
 /* USER CODE END Includes */
 
@@ -54,6 +55,11 @@ __attribute__((section(".dma_buffer"), aligned(4))) uint16_t g_adcDmaBuffer[ADC_
 volatile uint16_t g_adcLatestSample = 0U;
 volatile uint8_t g_adcDataReady = 0U;
 volatile uint32_t g_adcErrorCode = HAL_ADC_ERROR_NONE;
+
+/* Motor simulation variables */
+MotorSim_StateTypeDef g_motorState;
+MotorSim_ParamTypeDef g_motorParam;
+volatile uint8_t g_motorStepFlag = 0U;
 
 /* USER CODE END PV */
 
@@ -107,12 +113,25 @@ int main(void)
   MX_TIM8_Init();
   MX_USART1_UART_Init();
   /* USER CODE BEGIN 2 */
+  
+  /* Initialize motor simulation with default parameters */
+  MotorSim_GetDefaultParams(&g_motorParam);
+  MotorSim_Init(&g_motorState, &g_motorParam);
+  
+  /* Calibrate ADC1 */
   if (HAL_ADCEx_Calibration_Start(&hadc1, ADC_CALIB_OFFSET_LINEARITY, ADC_SINGLE_ENDED) != HAL_OK)
   {
     Error_Handler();
   }
 
+  /* Start ADC DMA conversion */
   if (HAL_ADC_Start_DMA(&hadc1, (uint32_t *)g_adcDmaBuffer, ADC_BUFFER_LENGTH) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  
+  /* Start timer for motor simulation step */
+  if (HAL_TIM_Base_Start_IT(&htim2) != HAL_OK)
   {
     Error_Handler();
   }
@@ -126,25 +145,36 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+    
+    /* Process motor simulation step when timer flag is set */
+    if (g_motorStepFlag != 0U)
+    {
+      HAL_GPIO_WritePin(INDICATOR_GPIO_Port, INDICATOR_Pin, GPIO_PIN_SET);
+      g_motorStepFlag = 0U;
+      
+      /* Convert ADC sample to voltage (assuming 0-3.3V range, 16-bit ADC) */
+      float voltage_input = ((float)g_adcLatestSample / 65535.0f) * 3.3f;
+      
+      /* Execute motor simulation step */
+      MotorSim_Step(&g_motorState, &g_motorParam, voltage_input);
+      HAL_GPIO_WritePin(INDICATOR_GPIO_Port, INDICATOR_Pin, GPIO_PIN_RESET);
+    }
+    
+    /* Process ADC data when ready */
     if (g_adcDataReady != 0U)
     {
       g_adcDataReady = 0U;
       g_adcLatestSample = g_adcDmaBuffer[ADC_BUFFER_LENGTH - 1U];
-      HAL_GPIO_TogglePin(GPIOB, HALL_A_Pin);
-      if (g_adcLatestSample > 32768U)
-      {
-        HAL_GPIO_WritePin(GPIOB, HALL_B_Pin, GPIO_PIN_SET);
-      }
-      else
-      {
-        HAL_GPIO_WritePin(GPIOB, HALL_B_Pin, GPIO_PIN_RESET);
-      }
     }
-    HAL_Delay(10U);
+    
+    /* Check for ADC errors */
     if (g_adcErrorCode != HAL_ADC_ERROR_NONE)
     {
-      HAL_GPIO_WritePin(GPIOB, HALL_A_Pin|HALL_B_Pin, GPIO_PIN_RESET);
+      /* Error handling - could log or reset */
+      g_adcErrorCode = HAL_ADC_ERROR_NONE;
     }
+    
+    //HAL_Delay(10U);
   }
   /* USER CODE END 3 */
 }
@@ -208,6 +238,12 @@ void SystemClock_Config(void)
 }
 
 /* USER CODE BEGIN 4 */
+
+/**
+  * @brief  ADC conversion complete callback
+  * @param  hadc ADC handle
+  * @retval None
+  */
 void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef *hadc)
 {
   if (hadc->Instance == ADC1)
@@ -216,6 +252,11 @@ void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef *hadc)
   }
 }
 
+/**
+  * @brief  ADC error callback
+  * @param  hadc ADC handle
+  * @retval None
+  */
 void HAL_ADC_ErrorCallback(ADC_HandleTypeDef *hadc)
 {
   if (hadc->Instance == ADC1)
@@ -224,11 +265,30 @@ void HAL_ADC_ErrorCallback(ADC_HandleTypeDef *hadc)
   }
 }
 
+/**
+  * @brief  ADC half conversion complete callback
+  * @param  hadc ADC handle
+  * @retval None
+  */
 void HAL_ADC_ConvHalfCpltCallback(ADC_HandleTypeDef *hadc)
 {
   if (hadc->Instance == ADC1)
   {
     /* Half-buffer ready if needed for double-buffer processing */
+  }
+}
+
+/**
+  * @brief  Timer period elapsed callback
+  * @param  htim Timer handle
+  * @retval None
+  */
+void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
+{
+  if (htim->Instance == TIM2)
+  {
+    /* Set flag to trigger motor simulation step in main loop */
+    g_motorStepFlag = 1U;
   }
 }
 
